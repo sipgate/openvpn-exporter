@@ -27,6 +27,7 @@ type OpenvpnServerHeaderField struct {
 
 type OpenVPNExporter struct {
 	statusPaths                 []string
+	ignoreIndividuals           bool
 	openvpnUpDesc               *prometheus.Desc
 	openvpnStatusUpdateTimeDesc *prometheus.Desc
 	openvpnConnectedClientsDesc *prometheus.Desc
@@ -96,10 +97,10 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNE
 	var serverHeaderRoutingLabels []string
 	var serverHeaderRoutingLabelColumns []string
 	if ignoreIndividuals {
-		serverHeaderClientLabels = []string{"status_path", "common_name"}
-		serverHeaderClientLabelColumns = []string{"Common Name"}
-		serverHeaderRoutingLabels = []string{"status_path", "common_name"}
-		serverHeaderRoutingLabelColumns = []string{"Common Name"}
+		serverHeaderClientLabels = []string{"status_path"}
+		serverHeaderClientLabelColumns = []string{}
+		serverHeaderRoutingLabels = []string{"status_path"}
+		serverHeaderRoutingLabelColumns = []string{}
 	} else {
 		serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username"}
 		serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username"}
@@ -146,6 +147,7 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNE
 
 	return &OpenVPNExporter{
 		statusPaths:                 statusPaths,
+		ignoreIndividuals:           ignoreIndividuals,
 		openvpnUpDesc:               openvpnUpDesc,
 		openvpnStatusUpdateTimeDesc: openvpnStatusUpdateTimeDesc,
 		openvpnConnectedClientsDesc: openvpnConnectedClientsDesc,
@@ -186,6 +188,10 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 	numberConnectedClient := 0
 
 	recordedMetrics := map[OpenvpnServerHeaderField][]string{}
+
+	// Aggregated metrics when ignoreIndividuals is true
+	aggregatedMetrics := make(map[OpenvpnServerHeaderField]float64)
+	aggregatedMetricsInitialized := make(map[OpenvpnServerHeaderField]bool)
 
 	for scanner.Scan() {
 		fields := strings.Split(scanner.Text(), separator)
@@ -231,28 +237,50 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 				columnValues[column] = fields[i+1]
 			}
 
-			// Extract columns that should act as entry labels.
-			labels := []string{statusPath}
-			for _, column := range header.LabelColumns {
-				labels = append(labels, columnValues[column])
-			}
-
-			// Export relevant columns as individual metrics.
-			for _, metric := range header.Metrics {
-				if columnValue, ok := columnValues[metric.Column]; ok {
-					if l := recordedMetrics[metric]; !subslice(labels, l) {
+			if e.ignoreIndividuals {
+				// Aggregate metrics instead of exporting individual client data
+				for _, metric := range header.Metrics {
+					if columnValue, ok := columnValues[metric.Column]; ok {
 						value, err := strconv.ParseFloat(columnValue, 64)
 						if err != nil {
 							return err
 						}
-						ch <- prometheus.MustNewConstMetric(
-							metric.Desc,
-							metric.ValueType,
-							value,
-							labels...)
-						recordedMetrics[metric] = append(recordedMetrics[metric], labels...)
-					} else {
-						log.Printf("Metric entry with same labels: %s, %s", metric.Column, labels)
+						// For CounterValue: sum up all values
+						// For GaugeValue (timestamps): use maximum (most recent)
+						if metric.ValueType == prometheus.CounterValue {
+							aggregatedMetrics[metric] += value
+						} else if metric.ValueType == prometheus.GaugeValue {
+							if !aggregatedMetricsInitialized[metric] || value > aggregatedMetrics[metric] {
+								aggregatedMetrics[metric] = value
+								aggregatedMetricsInitialized[metric] = true
+							}
+						}
+					}
+				}
+			} else {
+				// Extract columns that should act as entry labels.
+				labels := []string{statusPath}
+				for _, column := range header.LabelColumns {
+					labels = append(labels, columnValues[column])
+				}
+
+				// Export relevant columns as individual metrics.
+				for _, metric := range header.Metrics {
+					if columnValue, ok := columnValues[metric.Column]; ok {
+						if l := recordedMetrics[metric]; !subslice(labels, l) {
+							value, err := strconv.ParseFloat(columnValue, 64)
+							if err != nil {
+								return err
+							}
+							ch <- prometheus.MustNewConstMetric(
+								metric.Desc,
+								metric.ValueType,
+								value,
+								labels...)
+							recordedMetrics[metric] = append(recordedMetrics[metric], labels...)
+						} else {
+							log.Printf("Metric entry with same labels: %s, %s", metric.Column, labels)
+						}
 					}
 				}
 			}
@@ -260,6 +288,18 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 			return fmt.Errorf("ERROR: unsupported key: %q (%s)", fields[0], statusPath)
 		}
 	}
+
+	// Export aggregated metrics when ignoreIndividuals is true
+	if e.ignoreIndividuals {
+		for metric, value := range aggregatedMetrics {
+			ch <- prometheus.MustNewConstMetric(
+				metric.Desc,
+				metric.ValueType,
+				value,
+				statusPath)
+		}
+	}
+
 	// add the number of connected client
 	ch <- prometheus.MustNewConstMetric(
 		e.openvpnConnectedClientsDesc,

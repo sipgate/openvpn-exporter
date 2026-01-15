@@ -37,6 +37,12 @@ This project is based on the [OpenVPN Exporter](https://github.com/kumina/openvp
 | openvpn_client_pre_decompress_bytes_total        | Total amount of data before decompression, in bytes.                   | `status_path`                                                                                 |
 | openvpn_client_post_decompress_bytes_total       | Total amount of data after decompression, in bytes.                    | `status_path`                                                                                 |
 
+> **Note:** When `openvpn.ignore-individuals` is set to `true`, all server metrics will be aggregated per `status_path`:
+> - `openvpn_server_client_received_bytes_total` and `openvpn_server_client_sent_bytes_total`: Summed across all clients
+> - `openvpn_server_route_last_reference_time_seconds`: Most recent (maximum) timestamp across all routes
+>
+> Individual client data is not distinguishable anymore. This is important when OpenVPN is configured with `username-as-common-name`, as the `common_name` would otherwise contain user information.
+
 ## Flags / Environment Variables
 
 ```bash
@@ -51,7 +57,7 @@ You can use the following flags to configure the exporter. All flags can also be
 | `openvpn.status-files`       | `OPENVPN_STATUS_FILES`       | Path to OpenVPN status file. Can be a comma separated list                                      | `/var/log/openvpn-status.log` |
 | `openvpn.metrics-path`       | `OPENVPN_METRICS_PATH`       | Path under which to expose metrics                                                              | `/metrics`                    |
 | `openvpn.listen-address`     | `OPENVPN_LISTEN_ADDRESS`     | Address to listen on for web interface and telemetry                                            | `:9176`                       |
-| `openvpn.ignore-individuals` | `OPENVPN_IGNORE_INDIVIDUALS` | Don't export following labels: `connection_time`, `real_address`, `virtual_address`, `username` | `false`                       |
+| `openvpn.ignore-individuals` | `OPENVPN_IGNORE_INDIVIDUALS` | Aggregate all client metrics instead of exporting individual client data. Server metrics will only use `status_path` as label. Individual labels (`common_name`, `connection_time`, `real_address`, `virtual_address`, `username`) are not exported. | `false`                       |
 
 ## Release
 
